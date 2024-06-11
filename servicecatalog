@@ -1,0 +1,169 @@
+package main
+
+import (
+	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/servicecatalog"
+)
+
+func main() {
+	catalogProduct := "s3-bucket"
+	provisionedProductName := "nikhil-s3-bucket"
+
+	parameters := map[string]string{
+		"name": "nikhil-bucket",
+	}
+
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	})
+
+	if err != nil {
+		fmt.Println("Error creating session:", err)
+		return
+	}
+
+	initProvision(sess, catalogProduct, provisionedProductName, parameters)
+}
+
+func initProvision(sess *session.Session, catalogproductName string, provisionedProductName string, parameters map[string]string) {
+
+	result := checkProductExists(sess, provisionedProductName)
+	if result.Error != nil {
+		fmt.Println("Error:", result.Error)
+		return
+	}
+
+	if !result.Exists {
+		err := provisionProduct(sess, catalogproductName, parameters)
+		if err != nil {
+			fmt.Println("Error provisioning product:", err)
+			return
+		}
+		fmt.Println("Product provisioned successfully!")
+	} else {
+		fmt.Println("Provisioned product exists")
+		err := updateProduct(sess, result.ProvisionedID, parameters)
+		if err != nil {
+			fmt.Println("Error updating product:", err)
+			return
+		}
+		fmt.Println("Product updated successfully!")
+	}
+}
+
+func provisionProduct(sess *session.Session, catalogproductName string, parameters map[string]string) error {
+
+	svc := servicecatalog.New(sess)
+	var inputParams []*servicecatalog.ProvisioningParameter
+	for key, value := range parameters {
+		inputParams = append(inputParams, &servicecatalog.ProvisioningParameter{
+			Key:   aws.String(key),
+			Value: aws.String(value),
+		})
+	}
+
+	output, err := svc.ProvisionProduct(&servicecatalog.ProvisionProductInput{
+		ProductId:              aws.String(catalogproductName),
+		ProvisioningParameters: inputParams,
+	})
+	if err != nil {
+		return err
+	}
+
+	err = fetchPPID(*output.RecordDetail.RecordId, svc)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func fetchPPID(recordId string, svc *servicecatalog.ServiceCatalog) error {
+	resp, err := svc.DescribeRecord(&servicecatalog.DescribeRecordInput{
+		Id: aws.String(recordId),
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Provisioned product id:", *resp.RecordDetail.ProvisionedProductId)
+
+	return nil
+}
+
+func updateProduct(sess *session.Session, provisionedProductId string, parameters map[string]string) error {
+
+	svc := servicecatalog.New(sess)
+
+	var inputParams []*servicecatalog.UpdateProvisioningParameter
+	for key, value := range parameters {
+		inputParams = append(inputParams, &servicecatalog.UpdateProvisioningParameter{
+			Key:   aws.String(key),
+			Value: aws.String(value),
+		})
+	}
+
+	_, err := svc.UpdateProvisionedProduct(&servicecatalog.UpdateProvisionedProductInput{
+		ProvisionedProductId: aws.String(provisionedProductId),
+		ProvisioningParameters: inputParams,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type ExistenceResult struct {
+	Exists       bool
+	ProvisionedID string
+	Error        error
+}
+
+func checkProductExists(sess *session.Session, provisionedProductName string) ExistenceResult {
+	serviceCatalogClient := servicecatalog.New(sess)
+
+	input := &servicecatalog.SearchProvisionedProductsInput{
+		Filters: map[string][]*string{
+			"SearchQuery": {aws.String("name:" + provisionedProductName)},
+		},
+	}
+
+	result, err := serviceCatalogClient.SearchProvisionedProducts(input)
+
+	if err != nil {
+		return ExistenceResult{Exists: false, ProvisionedID: "", Error: err}
+	}
+
+	if len(result.ProvisionedProducts) > 0 {
+		ppid, err := getPPID(sess, provisionedProductName)
+		if err != nil {
+			return ExistenceResult{Exists: false, ProvisionedID: "", Error: err}
+		}
+		return ExistenceResult{Exists: true, ProvisionedID: ppid, Error: nil}
+	}
+
+	return ExistenceResult{Exists: false, ProvisionedID: "", Error: nil}
+}
+
+func getPPID(sess *session.Session, provisionedProductName string) (string, error) {
+	serviceCatalogClient := servicecatalog.New(sess)
+
+	input := &servicecatalog.SearchProvisionedProductsInput{
+		Filters: map[string][]*string{
+			"SearchQuery": {aws.String("name:" + provisionedProductName)},
+		},
+	}
+
+	result, err := serviceCatalogClient.SearchProvisionedProducts(input)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(result.ProvisionedProducts) > 0 {
+		return *result.ProvisionedProducts[0].Id, nil
+	}
+	return "", fmt.Errorf("Provisioned product '%s' not found", provisionedProductName)
+}
